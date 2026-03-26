@@ -3,6 +3,8 @@ uvicorn
 pydantic
 python-dotenv
 python-jose[cryptography]
+bcrypt==3.2.2
 passlib[bcrypt]
+fastapi
 python-multipart
 openai
