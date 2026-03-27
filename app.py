@@ -1,136 +1,114 @@
+import streamlit as st
 import os
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
-from dotenv import load_dotenv
 from openai import OpenAI
-from jose import JWTError, jwt
-
-# Import from our modular files
+from dotenv import load_dotenv
 import database as db
 import auth
 
-# Load env variables
 load_dotenv()
 
-# Initialize API and standard DBs
-app = FastAPI(title="Quran AI RAG Bot")
+# Page Config
+st.set_page_config(page_title="Quran AI Bot", page_icon="📖")
+
+# Initialize Databases
 db.init_user_db()
 
-# Ensure at least one dev user exists (Naved)
-if not db.get_user("naved"):
-    db.create_user("naved", auth.get_password_hash("1234"), "naved@example.com")
+# --- Authentication Logic ---
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
 
-# Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def login():
+    st.title("Login to Quran AI")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Login")
+        
+        if submit:
+            user = db.get_user(username)
+            if user and auth.verify_password(password, user["hashed_password"]):
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
 
-# AI Client Setup
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+if not st.session_state.authenticated:
+    login()
+    st.stop()
 
-ai_client = OpenAI(base_url=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
+# --- Main App Interface ---
+st.title("📖 Quranic AI Assistant")
+st.sidebar.write(f"Logged in as: {st.session_state.username}")
+if st.sidebar.button("Logout"):
+    st.session_state.authenticated = False
+    st.rerun()
 
-# Auth Dependency
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# Initialize Chat History in Session State
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    
-    user = db.get_user(username)
-    if user is None or user["disabled"]:
-        raise credentials_exception
-    return dict(user)
+# Display Chat History
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-# --- Routes ---
+# User Input
+if prompt := st.chat_input("Ask a question about the Quran..."):
+    # 1. Display user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-@app.post("/token", response_model=auth.Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = db.get_user(form_data.username)
-    if not user or not auth.verify_password(form_data.password, user["hashed_password"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = auth.create_access_token(
-        data={"sub": user["username"]}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+    # 2. RAG: Search JSON for context
+    with st.spinner("Searching verses..."):
+        related_verses = db.search_quran_json(prompt)
+        
+        context_str = ""
+        if related_verses:
+            context_str = "Use these verses as context:\n"
+            for v in related_verses:
+                context_str += f"- {v['surah']} {v['ayah']}: {v['text']}\n"
 
-class MessageRequest(BaseModel):
-    content: str
-    thread_id: int = 1  # Hardcoded default for testing
+    # 3. Call AI (Ollama via Tunnel)
+    with st.chat_message("assistant"):
+        response_placeholder = st.empty()
+        full_response = ""
+        
+        try:
+            client = OpenAI(
+                base_url=os.getenv("OLLAMA_BASE_URL"), 
+                api_key=os.getenv("OLLAMA_API_KEY", "ollama")
+            )
+            
+            # Prepare messages for AI
+            system_prompt = (
+                "You are a helpful Quranic Assistant. Use the provided context to answer. "
+                "Always cite Surah names and Ayah numbers."
+            )
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": context_str}
+            ] + st.session_state.messages
 
-class ChatResponse(BaseModel):
-    author: str
-    content: str
-
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: MessageRequest, current_user: dict = Depends(get_current_user)):
-    user_msg = request.content
-    thread_id = request.thread_id
-
-    # 1. Save user message
-    db.save_msg(thread_id, "user", user_msg)
-    
-    # 2. Retrieve context from Quran DB (RAG)
-    related_verses = db.search_quran(user_msg)
-    
-    context_str = ""
-    if related_verses:
-        context_str = "Use the following verified Quranic verses to inform your answer:\n"
-        for v in related_verses:
-            context_str += f"- Surah {v['name_en']} Verse {v['ayah_id']}: {v['translation']} (Arabic: {v['arabic_text']})\n"
-
-    # 3. Load chat history
-    history = db.load_messages(thread_id)
-
-    # 4. Construct System Prompt
-    system_prompt = (
-        "You are an AI Quranic Assistant. Your primary goal is to provide accurate information based strictly on the provided context verses. "
-        "Always cite the Surah name and Verse number when referencing the text. "
-        "If the user's question cannot be answered using the provided context, state that clearly."
-    )
-
-    messages_payload = [
-        {"role": "system", "content": system_prompt},
-        {"role": "system", "content": f"Context Data:\n{context_str}"}
-    ] + history
-
-    # 5. Call Local AI Model via Tunnel
-    try:
-        response = ai_client.chat.completions.create(
-            model=OLLAMA_MODEL,
-            messages=messages_payload,
-            stream=False
-        )
-        ai_response = response.choices[0].message.content
-
-        # 6. Save AI response
-        db.save_msg(thread_id, "assistant", ai_response)
-
-        return ChatResponse(author="Assistant", content=ai_response)
-
-    except Exception as e:
-        print(f"AI Connection Error: {e}")
-        raise HTTPException(status_code=503, detail="Local AI Server Unreachable. Ensure Ollama/Tunnel is running.")
+            # Stream the response
+            stream = client.chat.completions.create(
+                model=os.getenv("OLLAMA_MODEL", "llama3"),
+                messages=messages,
+                stream=True,
+            )
+            
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    full_response += chunk.choices[0].delta.content
+                    response_placeholder.markdown(full_response + "▌")
+            
+            response_placeholder.markdown(full_response)
+            
+            # Save to session and history
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+            # Optional: Save to SQLite db.save_msg(1, "assistant", full_response)
+            
+        except Exception as e:
+            st.error(f"Connection Error: {e}")
