@@ -13,7 +13,7 @@ db.init_user_db()
 
 # Fix: Ensure logic matches database.py arguments
 if not db.get_user("naved"):
-    db.create_user("naved", auth.get_password_hash("1234"), "naved@concentrix.com")
+    db.create_user("naved", auth.get_password_hash("1234"), "naved@gmail.com")
 
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
