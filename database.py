@@ -7,23 +7,33 @@ USER_DB = "dev_bot_v2.db"
 QURAN_JSON = "quran.json"
 CHAPTERS_DIR = "chapters"
 
-def init_user_db():
-    conn = sqlite3.connect(USER_DB)
-    db = conn.cursor()
-    db.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (id INTEGER PRIMARY KEY, username TEXT UNIQUE, hashed_password TEXT)''')
-    conn.commit()
-    conn.close()
-
-def get_user(username):
+def get_user_db():
     conn = sqlite3.connect(USER_DB)
     conn.row_factory = sqlite3.Row
-    user = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
-    conn.close()
-    return user
+    return conn
+
+def init_user_db():
+    with get_user_db() as db:
+        db.execute('''CREATE TABLE IF NOT EXISTS users 
+                     (id INTEGER PRIMARY KEY, username TEXT UNIQUE, hashed_password TEXT, email TEXT, disabled BOOLEAN)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS messages 
+                     (id INTEGER PRIMARY KEY, thread_id INTEGER, role TEXT, content TEXT, timestamp TIMESTAMP)''')
+        db.commit()
+
+def get_user(username):
+    with get_user_db() as db:
+        return db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+
+def create_user(username, hashed_password, email):
+    """Fixed to accept exactly 3 arguments as called in app.py"""
+    with get_user_db() as db:
+        db.execute(
+            'INSERT INTO users (username, hashed_password, email, disabled) VALUES (?, ?, ?, ?)', 
+            (username, hashed_password, email, False)
+        )
+        db.commit()
 
 def search_quran_json(query_text, lang="en"):
-    """Searches quran.json and chapter name files."""
     try:
         with open(QURAN_JSON, 'r', encoding='utf-8') as f:
             quran_data = json.load(f)
@@ -37,16 +47,11 @@ def search_quran_json(query_text, lang="en"):
         
         for chapter in quran_data:
             chapter_id = chapter.get("id")
-            # Cross-reference chapter name from translation file
             chapter_name = next((c["name"] for c in chapters_data if c["id"] == chapter_id), f"Surah {chapter_id}")
             
             for verse in chapter.get("verses", []):
                 if query_text in verse.get("text", "").lower():
-                    results.append({
-                        "surah": chapter_name,
-                        "ayah": verse.get("id"),
-                        "text": verse.get("text")
-                    })
+                    results.append({"surah": chapter_name, "ayah": verse.get("id"), "text": verse.get("text")})
                 if len(results) >= 3: break
             if len(results) >= 3: break
         return results
