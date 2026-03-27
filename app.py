@@ -14,7 +14,7 @@ db.init_user_db()
 
 # Create default user 'naved' if not exists
 if not db.get_user("naved"):
-    db.create_user("naved", auth.get_password_hash("1234"), "naved@concentrix.com")
+    db.create_user("naved", auth.get_password_hash("1234"), "naved")
 
 # --- Authentication UI ---
 if 'authenticated' not in st.session_state:
