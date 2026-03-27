@@ -1,7 +1,6 @@
 import json
 import sqlite3
 import os
-from datetime import datetime
 
 USER_DB = "dev_bot_v2.db"
 QURAN_JSON = "quran.json"
@@ -14,8 +13,19 @@ def get_user_db():
 
 def init_user_db():
     with get_user_db() as db:
+        # 1. Create base table structure
         db.execute('''CREATE TABLE IF NOT EXISTS users 
-                     (id INTEGER PRIMARY KEY, username TEXT UNIQUE, hashed_password TEXT, email TEXT, disabled BOOLEAN)''')
+                     (id INTEGER PRIMARY KEY, username TEXT UNIQUE, hashed_password TEXT)''')
+        
+        # 2. Automatically upgrade schema if it's an old database version
+        try:
+            db.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            db.execute("ALTER TABLE users ADD COLUMN disabled BOOLEAN")
+        except sqlite3.OperationalError:
+            # OperationalError means the columns already exist, which is safe to ignore
+            pass 
+            
+        # 3. Create messages table for chat history
         db.execute('''CREATE TABLE IF NOT EXISTS messages 
                      (id INTEGER PRIMARY KEY, thread_id INTEGER, role TEXT, content TEXT, timestamp TIMESTAMP)''')
         db.commit()
@@ -25,13 +35,16 @@ def get_user(username):
         return db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
 
 def create_user(username, hashed_password, email):
-    """Fixed to accept exactly 3 arguments as called in app.py"""
-    with get_user_db() as db:
-        db.execute(
-            'INSERT INTO users (username, hashed_password, email, disabled) VALUES (?, ?, ?, ?)', 
-            (username, hashed_password, email, False)
-        )
-        db.commit()
+    try:
+        with get_user_db() as db:
+            # INSERT OR IGNORE prevents IntegrityError crashes if the user already exists
+            db.execute(
+                'INSERT OR IGNORE INTO users (username, hashed_password, email, disabled) VALUES (?, ?, ?, ?)', 
+                (username, hashed_password, email, False)
+            )
+            db.commit()
+    except Exception as e:
+        print(f"Database error during user creation: {e}")
 
 def search_quran_json(query_text, lang="en"):
     try:
@@ -55,5 +68,6 @@ def search_quran_json(query_text, lang="en"):
                 if len(results) >= 3: break
             if len(results) >= 3: break
         return results
-    except Exception:
+    except Exception as e:
+        print(f"Error searching JSON: {e}")
         return []
