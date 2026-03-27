@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import json
 from openai import OpenAI
 from dotenv import load_dotenv
 import database as db
@@ -7,70 +8,72 @@ import auth
 
 load_dotenv()
 
-# Page Config
+# --- Configuration & DB Init ---
 st.set_page_config(page_title="Quran AI Bot", page_icon="📖")
-
-# Initialize Databases
 db.init_user_db()
 
-# --- Authentication Logic ---
+# Create default user 'naved' if not exists
+if not db.get_user("naved"):
+    db.create_user("naved", auth.get_password_hash("1234"), "naved@concentrix.com")
+
+# --- Authentication UI ---
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
-def login():
-    st.title("Login to Quran AI")
-    with st.form("login_form"):
+if not st.session_state.authenticated:
+    st.title("🌙 Quran AI Login")
+    with st.form("login_gate"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Login")
-        
-        if submit:
+        if st.form_submit_button("Login"):
             user = db.get_user(username)
             if user and auth.verify_password(password, user["hashed_password"]):
                 st.session_state.authenticated = True
                 st.session_state.username = username
                 st.rerun()
             else:
-                st.error("Invalid username or password")
-
-if not st.session_state.authenticated:
-    login()
+                st.error("Invalid credentials")
     st.stop()
 
-# --- Main App Interface ---
+# --- Main Chat App ---
 st.title("📖 Quranic AI Assistant")
-st.sidebar.write(f"Logged in as: {st.session_state.username}")
+st.sidebar.title("Settings")
+st.sidebar.write(f"Logged in as: **{st.session_state.username}**")
+
 if st.sidebar.button("Logout"):
     st.session_state.authenticated = False
     st.rerun()
 
-# Initialize Chat History in Session State
+# Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display Chat History
+# Display chat messages from history on app rerun
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# User Input
+# React to user input
 if prompt := st.chat_input("Ask a question about the Quran..."):
-    # 1. Display user message
+    # Display user message
+    st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
 
-    # 2. RAG: Search JSON for context
-    with st.spinner("Searching verses..."):
-        related_verses = db.search_quran_json(prompt)
+    # 1. RAG: Search the JSON Data
+    with st.status("Searching Quranic verses...", expanded=False) as status:
+        # Search quran.json and map names from en.json
+        verses = db.search_quran_json(prompt, lang="en")
         
-        context_str = ""
-        if related_verses:
-            context_str = "Use these verses as context:\n"
-            for v in related_verses:
-                context_str += f"- {v['surah']} {v['ayah']}: {v['text']}\n"
+        context_text = ""
+        if verses:
+            context_text = "Use the following verses for context:\n"
+            for v in verses:
+                context_text += f"- Surah {v['surah']} Ayah {v['ayah']}: {v['text']}\n"
+            status.update(label=f"Found {len(verses)} relevant verses", state="complete")
+        else:
+            status.update(label="No direct verse matches found, using general knowledge.", state="complete")
 
-    # 3. Call AI (Ollama via Tunnel)
+    # 2. Call Ollama via OpenAI SDK
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         full_response = ""
@@ -81,18 +84,13 @@ if prompt := st.chat_input("Ask a question about the Quran..."):
                 api_key=os.getenv("OLLAMA_API_KEY", "ollama")
             )
             
-            # Prepare messages for AI
-            system_prompt = (
-                "You are a helpful Quranic Assistant. Use the provided context to answer. "
-                "Always cite Surah names and Ayah numbers."
-            )
-            
+            # Prepare System Prompt
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "system", "content": context_str}
+                {"role": "system", "content": "You are a knowledgeable Quranic scholar AI. Use the provided context to answer questions accurately and respectfully."},
+                {"role": "system", "content": f"CONTEXT:\n{context_text}"}
             ] + st.session_state.messages
 
-            # Stream the response
+            # Stream the response for a "typing" effect
             stream = client.chat.completions.create(
                 model=os.getenv("OLLAMA_MODEL", "llama3"),
                 messages=messages,
@@ -105,10 +103,8 @@ if prompt := st.chat_input("Ask a question about the Quran..."):
                     response_placeholder.markdown(full_response + "▌")
             
             response_placeholder.markdown(full_response)
-            
-            # Save to session and history
             st.session_state.messages.append({"role": "assistant", "content": full_response})
-            # Optional: Save to SQLite db.save_msg(1, "assistant", full_response)
             
         except Exception as e:
-            st.error(f"Connection Error: {e}")
+            st.error(f"Could not connect to AI Server: {e}")
+            st.info("Check if your Ollama tunnel is active at " + os.getenv("OLLAMA_BASE_URL", ""))
